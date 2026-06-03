@@ -50,19 +50,20 @@ The final training intervals were reserved as validation data to reflect the tim
 
 | Model | R2 |
 | --- | ---: |
-| RandomForestRegressor | 0.816569 |
-| XGBoostRegressor | 0.787585 |
-| LightGBMRegressor | 0.758822 |
-| CatBoostRegressor | 0.802698 |
-| WeightedTop3Ensemble | 0.818166 |
+| XGBoostRegressor | 0.787758 |
+| LightGBMRegressor | 0.763012 |
+| WeightedTop3Ensemble | 0.787760 |
+| Day49CorrectionHoldout | 0.907668 |
+| Day49CorrectionXGBoostWeight | 0.311011 |
+| Day49CorrectionCatBoostWeight | 0.688989 |
 
-## Top-3 Weighted Ensemble
+## Base Weighted Ensemble
 
 | Model | Weight |
 | --- | ---: |
-| RandomForestRegressor | 0.756822 |
-| CatBoostRegressor | 0.243178 |
-| XGBoostRegressor | 0.000000 |
+| XGBoostRegressor | 0.991367 |
+| LightGBMRegressor | 0.008633 |
 
-The final `submission.csv` is produced by refitting each top-3 model on all training rows and applying the
-optimized validation weights to their test predictions.
+The base fallback predictions are produced by refitting the weighted ensemble on all training rows.
+The final `submission.csv` then applies a day-49 correction blend for rows with an exact previous-day
+same-location/same-time demand signal, while preserving the base ensemble for unmatched rows.

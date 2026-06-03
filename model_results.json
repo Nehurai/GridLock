@@ -1,27 +1,24 @@
 {
   "validation_rows": 10213,
   "scores": {
-    "RandomForestRegressor": 0.8165694574668835,
-    "XGBoostRegressor": 0.787585386154249,
-    "LightGBMRegressor": 0.7588222284695809,
-    "CatBoostRegressor": 0.8026981609826016,
-    "WeightedTop3Ensemble": 0.8181664526095125
+    "XGBoostRegressor": 0.787757872915572,
+    "LightGBMRegressor": 0.7630115215977289,
+    "WeightedTop3Ensemble": 0.7877597496522448,
+    "Day49CorrectionHoldout": 0.9076677048703979,
+    "Day49CorrectionXGBoostWeight": 0.3110109701768371,
+    "Day49CorrectionCatBoostWeight": 0.6889890298231629
   },
   "ranked_base_models": [
-    "RandomForestRegressor",
-    "CatBoostRegressor",
     "XGBoostRegressor",
     "LightGBMRegressor"
   ],
   "ensemble_models": [
-    "RandomForestRegressor",
-    "CatBoostRegressor",
-    "XGBoostRegressor"
+    "XGBoostRegressor",
+    "LightGBMRegressor"
   ],
   "ensemble_weights": {
-    "RandomForestRegressor": 0.7568220847616752,
-    "CatBoostRegressor": 0.2431779152383246,
-    "XGBoostRegressor": 8.59296094338409e-17
+    "XGBoostRegressor": 0.9913669681700317,
+    "LightGBMRegressor": 0.008633031829968524
   },
   "submission_shape": [
     41778,

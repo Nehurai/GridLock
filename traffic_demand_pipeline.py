@@ -15,7 +15,6 @@ from catboost import CatBoostRegressor
 from lightgbm import LGBMRegressor
 from scipy.optimize import minimize
 from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import r2_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
@@ -148,36 +147,20 @@ def build_models(categorical_columns: list[str], numeric_columns: list[str]) -> 
         ]
     )
     return {
-        "RandomForestRegressor": Pipeline(
-            [
-                ("preprocessor", preprocessor),
-                (
-                    "model",
-                    RandomForestRegressor(
-                        n_estimators=240,
-                        max_depth=24,
-                        min_samples_leaf=2,
-                        max_features=0.8,
-                        n_jobs=1,
-                        random_state=RANDOM_STATE,
-                    ),
-                ),
-            ]
-        ),
         "XGBoostRegressor": Pipeline(
             [
                 ("preprocessor", preprocessor),
                 (
                     "model",
                     XGBRegressor(
-                        n_estimators=700,
+                        n_estimators=450,
                         learning_rate=0.045,
                         max_depth=9,
                         min_child_weight=3,
                         subsample=0.9,
                         colsample_bytree=0.9,
                         objective="reg:squarederror",
-                        n_jobs=1,
+                        n_jobs=-1,
                         random_state=RANDOM_STATE,
                     ),
                 ),
@@ -189,7 +172,7 @@ def build_models(categorical_columns: list[str], numeric_columns: list[str]) -> 
                 (
                     "model",
                     LGBMRegressor(
-                        n_estimators=900,
+                        n_estimators=700,
                         learning_rate=0.035,
                         num_leaves=80,
                         max_depth=-1,
@@ -197,7 +180,7 @@ def build_models(categorical_columns: list[str], numeric_columns: list[str]) -> 
                         colsample_bytree=0.9,
                         reg_lambda=0.1,
                         verbosity=-1,
-                        n_jobs=1,
+                        n_jobs=-1,
                         random_state=RANDOM_STATE,
                     ),
                 ),
@@ -273,14 +256,15 @@ The final training intervals were reserved as validation data to reflect the tim
 | --- | ---: |
 {chr(10).join(score_rows)}
 
-## Top-3 Weighted Ensemble
+## Base Weighted Ensemble
 
 | Model | Weight |
 | --- | ---: |
 {chr(10).join(ensemble_rows)}
 
-The final `submission.csv` is produced by refitting each top-3 model on all training rows and applying the
-optimized validation weights to their test predictions.
+The base fallback predictions are produced by refitting the weighted ensemble on all training rows.
+The final `submission.csv` then applies a day-49 correction blend for rows with an exact previous-day
+same-location/same-time demand signal, while preserving the base ensemble for unmatched rows.
 """
     (ROOT / "EDA_REPORT.md").write_text(report, encoding="utf-8")
 
@@ -299,7 +283,7 @@ def main() -> None:
 
     categorical_columns = features.select_dtypes(include="object").columns.tolist()
     numeric_columns = features.columns.difference(categorical_columns).tolist()
-    numeric_medians = features[numeric_columns].median()
+    numeric_medians = features[numeric_columns].median().fillna(0)
     for frame in (features, test_features):
         frame[categorical_columns] = frame[categorical_columns].fillna("Missing").astype(str)
         frame[numeric_columns] = frame[numeric_columns].fillna(numeric_medians)
@@ -313,16 +297,6 @@ def main() -> None:
     print(f"Chronological split: train={len(x_train)}, validation={len(x_valid)}")
 
     models = build_models(categorical_columns, numeric_columns)
-    catboost = CatBoostRegressor(
-        iterations=900,
-        learning_rate=0.055,
-        depth=10,
-        loss_function="RMSE",
-        verbose=False,
-        random_seed=RANDOM_STATE,
-        thread_count=1,
-        allow_writing_files=False,
-    )
     scores: dict[str, float] = {}
     validation_predictions: dict[str, np.ndarray] = {}
     for name, model in models.items():
@@ -331,12 +305,6 @@ def main() -> None:
         validation_predictions[name] = model.predict(x_valid)
         scores[name] = float(r2_score(y_valid, validation_predictions[name]))
         print(f"{name}: R2={scores[name]:.6f}")
-
-    print("Training CatBoostRegressor...")
-    catboost.fit(x_train, y_train, cat_features=categorical_columns)
-    validation_predictions["CatBoostRegressor"] = catboost.predict(x_valid)
-    scores["CatBoostRegressor"] = float(r2_score(y_valid, validation_predictions["CatBoostRegressor"]))
-    print(f"CatBoostRegressor: R2={scores['CatBoostRegressor']:.6f}")
 
     ranked = sorted(scores, key=scores.get, reverse=True)
     top_names = ranked[:3]
@@ -351,28 +319,193 @@ def main() -> None:
     test_prediction_map: dict[str, np.ndarray] = {}
     for name in top_names:
         print(f"Refitting {name} on all training rows...")
-        if name == "CatBoostRegressor":
-            model = CatBoostRegressor(
-                iterations=900,
-                learning_rate=0.055,
-                depth=10,
-                loss_function="RMSE",
-                verbose=False,
-                random_seed=RANDOM_STATE,
-                thread_count=1,
-                allow_writing_files=False,
-            )
-            model.fit(features, target, cat_features=categorical_columns)
-        else:
-            model = models[name]
-            model.fit(features, target)
+        model = models[name]
+        model.fit(features, target)
         test_prediction_map[name] = model.predict(test_features)
 
     test_prediction_matrix = np.column_stack([test_prediction_map[name] for name in top_names])
+    base_test_predictions = np.clip(test_prediction_matrix @ weights, 0, None)
+    base_submission = pd.DataFrame(
+        {
+            sample.columns[0]: test["Index"],
+            sample.columns[1]: base_test_predictions,
+        }
+    )
+    base_submission.to_csv(ROOT / "submission_base_ensemble.csv", index=False)
+
+    correction_features = features.copy()
+    correction_test_features = test_features.copy()
+    previous_day = features[["geohash", "day", "minutes_since_midnight"]].copy()
+    previous_day["prev_day_same_slot_demand"] = target.to_numpy()
+    previous_day["day"] += 1
+    correction_features = correction_features.merge(
+        previous_day,
+        on=["geohash", "day", "minutes_since_midnight"],
+        how="left",
+    )
+    correction_test_features = correction_test_features.merge(
+        previous_day,
+        on=["geohash", "day", "minutes_since_midnight"],
+        how="left",
+    )
+    for frame in (correction_features, correction_test_features):
+        frame["prev_day_missing"] = frame["prev_day_same_slot_demand"].isna().astype(int)
+        frame["prev_day_to_geohash_lat"] = frame["prev_day_same_slot_demand"] / (
+            frame["geohash_lat"].abs() + 1e-6
+        )
+
+    correction_rows = correction_features["prev_day_same_slot_demand"].notna()
+    correction_train = correction_features.loc[correction_rows].copy()
+    correction_target = target.loc[correction_rows]
+    correction_validation_mask = correction_train["minutes_since_midnight"] > 75
+    correction_train_mask = ~correction_validation_mask
+
+    correction_categorical = correction_train.select_dtypes(include="object").columns.tolist()
+    correction_numeric = correction_train.columns.difference(correction_categorical).tolist()
+    correction_medians = (
+        correction_train.loc[correction_train_mask, correction_numeric].median().fillna(0)
+    )
+    for frame in (correction_train, correction_test_features):
+        frame[correction_categorical] = frame[correction_categorical].fillna("Missing").astype(str)
+        frame[correction_numeric] = frame[correction_numeric].fillna(correction_medians)
+
+    correction_weights = np.array([0.2573, 0.7427])
+    if correction_validation_mask.any() and correction_train_mask.any():
+        correction_xgb_validator = Pipeline(
+            [
+                (
+                    "preprocessor",
+                    ColumnTransformer(
+                        [
+                            (
+                                "categorical",
+                                OneHotEncoder(handle_unknown="ignore"),
+                                correction_categorical,
+                            ),
+                            ("numeric", "passthrough", correction_numeric),
+                        ]
+                    ),
+                ),
+                (
+                    "model",
+                    XGBRegressor(
+                        n_estimators=250,
+                        learning_rate=0.03,
+                        max_depth=4,
+                        min_child_weight=2,
+                        subsample=0.9,
+                        colsample_bytree=0.9,
+                        objective="reg:squarederror",
+                        n_jobs=-1,
+                        random_state=RANDOM_STATE,
+                    ),
+                ),
+            ]
+        )
+        correction_cat_validator = CatBoostRegressor(
+            iterations=400,
+            learning_rate=0.035,
+            depth=5,
+            loss_function="RMSE",
+            verbose=False,
+            random_seed=RANDOM_STATE,
+            thread_count=-1,
+            allow_writing_files=False,
+        )
+        correction_xgb_validator.fit(
+            correction_train.loc[correction_train_mask],
+            correction_target.loc[correction_train_mask],
+        )
+        correction_cat_validator.fit(
+            correction_train.loc[correction_train_mask],
+            correction_target.loc[correction_train_mask],
+            cat_features=correction_categorical,
+        )
+        correction_valid_matrix = np.column_stack(
+            [
+                correction_xgb_validator.predict(correction_train.loc[correction_validation_mask]),
+                correction_cat_validator.predict(correction_train.loc[correction_validation_mask]),
+            ]
+        )
+        correction_weights = optimize_weights(
+            correction_valid_matrix,
+            correction_target.loc[correction_validation_mask],
+        )
+        correction_valid_predictions = correction_valid_matrix @ correction_weights
+        correction_score = float(
+            r2_score(
+                correction_target.loc[correction_validation_mask],
+                correction_valid_predictions,
+            )
+        )
+        scores["Day49CorrectionHoldout"] = correction_score
+        scores["Day49CorrectionXGBoostWeight"] = float(correction_weights[0])
+        scores["Day49CorrectionCatBoostWeight"] = float(correction_weights[1])
+        print("Day49 correction weights:", correction_weights.round(6).tolist())
+        print(f"Day49CorrectionHoldout: R2={correction_score:.6f}")
+
+    correction_xgb_model = Pipeline(
+        [
+            (
+                "preprocessor",
+                ColumnTransformer(
+                    [
+                        (
+                            "categorical",
+                            OneHotEncoder(handle_unknown="ignore"),
+                            correction_categorical,
+                        ),
+                        ("numeric", "passthrough", correction_numeric),
+                    ]
+                ),
+            ),
+            (
+                "model",
+                XGBRegressor(
+                    n_estimators=250,
+                    learning_rate=0.03,
+                    max_depth=4,
+                    min_child_weight=2,
+                    subsample=0.9,
+                    colsample_bytree=0.9,
+                    objective="reg:squarederror",
+                    n_jobs=-1,
+                    random_state=RANDOM_STATE,
+                ),
+            ),
+        ]
+    )
+    correction_cat_model = CatBoostRegressor(
+        iterations=400,
+        learning_rate=0.035,
+        depth=5,
+        loss_function="RMSE",
+        verbose=False,
+        random_seed=RANDOM_STATE,
+        thread_count=-1,
+        allow_writing_files=False,
+    )
+    correction_xgb_model.fit(correction_train, correction_target)
+    correction_cat_model.fit(
+        correction_train,
+        correction_target,
+        cat_features=correction_categorical,
+    )
+    corrected_test_matrix = np.column_stack(
+        [
+            correction_xgb_model.predict(correction_test_features),
+            correction_cat_model.predict(correction_test_features),
+        ]
+    )
+    corrected_test_predictions = np.clip(corrected_test_matrix @ correction_weights, 0, None)
+    has_correction = correction_test_features["prev_day_missing"].to_numpy() == 0
+    final_test_predictions = base_test_predictions.copy()
+    final_test_predictions[has_correction] = corrected_test_predictions[has_correction]
+
     submission = pd.DataFrame(
         {
             sample.columns[0]: test["Index"],
-            sample.columns[1]: np.clip(test_prediction_matrix @ weights, 0, None),
+            sample.columns[1]: final_test_predictions,
         }
     )
     submission.to_csv(ROOT / "submission.csv", index=False)
