@@ -22,6 +22,7 @@ CAT_FEATURES = [
     "LargeVehicles",
     "Landmarks",
     "Weather",
+    "timestamp",
 ]
 
 warnings.filterwarnings("ignore")
@@ -86,6 +87,15 @@ def add_prev_day_demand(source_train: pd.DataFrame, frame: pd.DataFrame) -> pd.D
     prev_day = prev_day.rename(columns={TARGET: "prev_day_demand"})
     frame = frame.merge(prev_day, on=["geohash", "day", "timestamp"], how="left")
     frame["prev_day_missing"] = frame["prev_day_demand"].isna().astype(int)
+    return frame
+
+
+def add_group_stats(source_train: pd.DataFrame, frame: pd.DataFrame, groups: dict[str, list[str]]) -> pd.DataFrame:
+    frame = frame.copy()
+    for name, cols in groups.items():
+        group_mean = source_train.groupby(cols)[TARGET].mean()
+        frame[name] = frame.set_index(cols).index.map(group_mean).astype(float)
+        frame[name] = frame[name].fillna(source_train[TARGET].mean())
     return frame
 
 
@@ -165,6 +175,28 @@ def make_validation_split(train_features: pd.DataFrame) -> tuple[pd.Index, pd.In
 def main() -> None:
     train_features, test_features, target, sample, _ = build_feature_set()
 
+    train_idx, valid_idx = make_validation_split(train_features)
+    train_with_target = train_features.loc[train_idx].copy()
+    train_with_target[TARGET] = target.loc[train_idx]
+    stat_groups = {
+        "gh_mean": ["geohash"],
+        "ts_mean": ["timestamp"],
+        "gh_ts_mean": ["geohash", "timestamp"],
+        "gh4_mean": ["geohash_prefix4"],
+        "gh5_mean": ["geohash_prefix5"],
+        "road_mean": ["RoadType"],
+        "weather_mean": ["Weather"],
+        "gh_hour_mean": ["geohash", "hour"],
+        "gh_quarter_mean": ["geohash", "quarter"],
+    }
+    train_features = add_group_stats(train_with_target, train_features, stat_groups)
+    test_features = add_group_stats(train_with_target, test_features, stat_groups)
+
+    x_train = train_features.loc[train_idx]
+    x_valid = train_features.loc[valid_idx]
+    y_train = target.loc[train_idx]
+    y_valid = target.loc[valid_idx]
+
     feature_columns = [
         "day_index",
         "hour",
@@ -192,13 +224,17 @@ def main() -> None:
         "LargeVehicles",
         "Landmarks",
         "Weather",
+        "timestamp",
+        "gh_mean",
+        "ts_mean",
+        "gh_ts_mean",
+        "gh4_mean",
+        "gh5_mean",
+        "road_mean",
+        "weather_mean",
+        "gh_hour_mean",
+        "gh_quarter_mean",
     ]
-
-    train_idx, valid_idx = make_validation_split(train_features)
-    x_train = train_features.loc[train_idx]
-    x_valid = train_features.loc[valid_idx]
-    y_train = target.loc[train_idx]
-    y_valid = target.loc[valid_idx]
 
     print(f"Training rows: {len(x_train)}, validation rows: {len(x_valid)}")
 
